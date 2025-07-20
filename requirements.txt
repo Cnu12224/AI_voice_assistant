@@ -1,0 +1,7 @@
+assemblyai
+sounddevice
+soundfile
+requests
+python-dotenv
+elevenlabs
+simpleaudio
