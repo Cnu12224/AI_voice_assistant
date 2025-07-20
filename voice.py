@@ -1,120 +1,87 @@
 import assemblyai as aai
-from elevenlabs.client import ElevenLabs
-from elevenlabs import stream
+import sounddevice as sd
+import soundfile as sf
 import requests
-import simpleaudio as sa
 import os
+import tempfile
 from dotenv import load_dotenv
+from elevenlabs.client import ElevenLabs
+import simpleaudio as sa
 import json
 
-class AIVoiceAgent:
-    def __init__(self):
-        load_dotenv()
-        aai.settings.api_key = os.getenv("ASSEMBLYAI_API_KEY")
-        self.client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
-        
-        self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.deepseek_url = "https://openrouter.ai/api/v1/chat/completions"  # Example URL
+# Load API keys from .env file
+load_dotenv()
+ASSEMBLY_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
+ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-        self.transcriber = None
+# Set AssemblyAI key
+aai.settings.api_key = ASSEMBLY_API_KEY
 
-        self.full_transcript = [
-            {"role": "system", "content": "You are a language model called R1 created by DeepSeek, answer the questions being asked in less than 300 characters."},
-        ]
 
-    def start_transcription(self):
-        print(f"\nReal-time transcription: ", end="\r\n")
-        self.transcriber = aai.RealtimeTranscriber(
-            sample_rate=16_000,
-            on_data=self.on_data,
-            on_error=self.on_error,
-            on_open=self.on_open,
-            on_close=self.on_close,
-        )
-        self.transcriber.connect()
-        microphone_stream = aai.extras.MicrophoneStream(sample_rate=16_000)
-        self.transcriber.stream(microphone_stream)
+def record_audio(filename, duration=5, fs=16000):
+    print("🎙️ Recording started...")
+    audio = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+    sd.wait()
+    sf.write(filename, audio, fs)
+    print("✅ Recording finished.")
 
-    def stop_transcription(self):
-        if self.transcriber:
-            self.transcriber.close()
-            self.transcriber = None
 
-    def on_open(self, session_opened: aai.RealtimeSessionOpened):
-        return
+def transcribe_audio(filepath):
+    transcriber = aai.Transcriber()
+    transcript = transcriber.transcribe(filepath)
+    print(f"📝 Transcription: {transcript.text}")
+    return transcript.text
 
-    def on_data(self, transcript: aai.RealtimeTranscript):
-        if not transcript.text:
-            return
 
-        if isinstance(transcript, aai.RealtimeFinalTranscript):
-            print(transcript.text)
-            self.generate_ai_response(transcript)
+def get_deepseek_response(prompt):
+    messages = [
+        {"role": "system", "content": "You are a helpful AI created by DeepSeek. Answer briefly."},
+        {"role": "user", "content": prompt},
+    ]
+
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "deepseek/deepseek-r1-0528:free",
+        "messages": messages,
+        "temperature": 0.7,
+        "stream": False
+    }
+
+    response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+    response.raise_for_status()
+    reply = response.json()["choices"][0]["message"]["content"]
+    print(f"🤖 DeepSeek Response: {reply}")
+    return reply
+
+
+def speak_text(response):
+    client = ElevenLabs(api_key="ELEVEN_API_KEY")
+    # Updated format for latest SDK
+    audio_stream = client.text_to_speech.convert(
+    voice_id="JBFqnCBsd6RMkjVDRZzb",
+    output_format="pcm_16000",  # Required format for direct playback
+    text= response,
+    model_id="eleven_multilingual_v2",
+)
+
+    audio_bytes = b"".join(audio_stream)
+
+    # Play the audio directly using simpleaudio
+    play_obj = sa.play_buffer(audio_bytes, num_channels=1, bytes_per_sample=2, sample_rate=16000)
+    play_obj.wait_done()
+
+
+if __name__ == "__main__":
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+        record_audio(temp_file.name, duration=5)
+        transcript = transcribe_audio(temp_file.name)
+        if transcript.strip():
+            response = get_deepseek_response(transcript)
+            speak_text(response)
         else:
-            print(transcript.text, end="\r")
-
-    def on_error(self, error: aai.RealtimeError):
-        return
-
-    def on_close(self):
-        return
-
-    def generate_ai_response(self, transcript):
-        self.stop_transcription()
-
-        self.full_transcript.append({"role": "user", "content": transcript.text})
-        print(f"\nUser: {transcript.text}", end="\r\n")
-
-        # ---- DeepSeek API CALL ----
-        headers = {
-            "Authorization": f"Bearer {self.deepseek_api_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": "deepseek-chat",  # or your exact model name
-            "messages": self.full_transcript,
-            "temperature": 0.7,
-            "stream": False  # No streaming
-        }
-
-        response = requests.post(self.deepseek_url, headers=headers, data=json.dumps(payload))
-
-        if response.status_code != 200:
-            print("Error from DeepSeek:", response.text)
-            return
-
-        response_json = response.json()
-        response_text = response_json['choices'][0]['message']['content']
-
-        # ---- ElevenLabs Text-to-Speech ----
-        print("DeepSeek R1:", end="\r\n")
-
-        text_buffer = ""
-        full_text = ""
-        for sentence in response_text.split(". "):
-            sentence = sentence.strip()
-            if not sentence.endswith("."):
-                sentence += "."
-            audio_stream = self.client.generate(
-                text=sentence,
-                model="eleven_turbo_v2",
-                stream=True
-            )
-            print(sentence, end="\n", flush=True)
-            self.play_audio_stream(audio_stream)
-            full_text += sentence + " "
-
-
-    def play_audio_stream(self, audio_stream):
-        wave_obj = sa.WaveObject.from_wave_file(audio_stream)
-        play_obj = wave_obj.play()
-        play_obj.wait_done()
-
-
-        self.full_transcript.append({"role": "assistant", "content": full_text.strip()})
-        self.start_transcription()
-
-
-ai_voice_agent = AIVoiceAgent()
-ai_voice_agent.start_transcription()
+            print("⚠️ No voice input detected.")
